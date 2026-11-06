@@ -173,7 +173,8 @@ GLaDOS 在 2026 年初进行了 API 更新，**绝大多数旧签到脚本已失
 | 变量名               | 必填  | 说明                                                                       |
 | -------------------- | ----- | -------------------------------------------------------------------------- |
 | `GLADOS_COOKIE`      | ✅ 是 | GLaDOS 的完整 Cookie，必须包含 `gld:sess` 与 `gld:sess.sig`。多个账号请用 `&` 或换行符分隔。 |
-| `GLADOS_USER_AGENT`  | ❌ 否 | 生成当前 `gld:sess` 时浏览器的完整 User-Agent；新版设备校验失败时需要配置。 |
+| `GLADOS_USER_AGENT`  | ❌ 否 | 生成当前 `gld:sess` 时浏览器的完整 User-Agent；新版设备校验失败时需要配置。多个账号可共用这一条。 |
+| `GLADOS_USER_AGENT_N` | ❌ 否 | 第 N 个账号的独立 User-Agent（`GLADOS_USER_AGENT_1` 起）。未设置的账号继续使用 `GLADOS_USER_AGENT`。Actions 工作流已转发 1–8；本地可设置更大的 N。 |
 | `PUSHPLUS_TOKEN`     | ❌ 否 | PushPlus 微信推送 Token。                                                  |
 | `SERVERCHAN_SENDKEY` | ❌ 否 | Server酱 SendKey，支持 Turbo（`SCT...`）与 Server酱³（`sctp...`）。         |
 | `TELEGRAM_BOT_TOKEN` | ❌ 否 | Telegram 机器人的 Token（例如 `123456:ABC-DEF1234...`）                    |
@@ -245,6 +246,10 @@ nonce/proof。旧脚本仅提交 token，缺少这一步；请同步最新 `chec
 服务端决定实际入账积分。接口返回 `Checkin! Got 1 Points` 且流水增加 1，说明已签到但
 本次奖励较低；不应把它当作网络失败反复补签。当天已经入账的积分不保证能补差，适配后的
 奖励数额需由下一次首次签到的服务端响应和积分流水验证。此项与 User-Agent 配置问题分别排查。
+
+等待时间在官网 2.5 秒下限之上随机取 2.8–4.0 秒。GitHub Actions 的 `schedule` 触发会再随机等待 5–45 秒，手动运行和外部定时器不等待。签到 POST 超时会立刻重新获取 nonce 并再提交一次，不会沿用旧 proof。挑战阶段若返回 Cookie 失效（`code == -2`）或设备不匹配（`code == 4`），会直接失败，不再空等。
+
+日志和推送会显示套餐（Free / Edu / Basic / Pro / Team / Enterprise）、连签天数，并保留 Team 套餐的小数积分。`/api/user/status` 返回 `code == -101`（或 `leftDays == -101`）时剩余天数显示为已过期。重复签到若响应里没有总积分或连签，会再读 `/api/user/points` 补全。Cookie 会去掉误粘贴的 `Cookie:` 前缀、外层引号和首尾空白；含非 ASCII 字符的账号会被跳过，且日志不输出 Cookie、User-Agent、nonce 或 proof。任一账号失败时进程以退出码 1 结束，GitHub Actions 会标红。
 
 ### 🎁 积分自动兑换（#11）
 

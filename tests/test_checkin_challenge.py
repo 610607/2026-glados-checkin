@@ -26,8 +26,8 @@ class ChallengeTests(unittest.TestCase):
 
     @mock.patch('checkin.time.monotonic', side_effect=[100, 102.5])
     @mock.patch('checkin.time.sleep')
-    @mock.patch('checkin.requests.post')
-    @mock.patch('checkin.requests.get')
+    @mock.patch('checkin.requests.Session.post')
+    @mock.patch('checkin.requests.Session.get')
     def test_official_challenge_flow_preserves_cookie_and_waits_before_post(self, get, post, sleep, timer):
         get.return_value = response({'code': 0, 'nonce': NONCE, 'ttl': 300000})
         post.return_value = response({'code': 0, 'message': 'Checkin! Got 12 Points'})
@@ -36,7 +36,10 @@ class ChallengeTests(unittest.TestCase):
 
         get.assert_called_once()
         self.assertEqual(get.call_args.args[0], checkin.DOMAINS[0] + '/api/user/checkin/challenge')
-        sleep.assert_called_once_with(2.5)
+        sleep.assert_called_once()
+        delay = sleep.call_args.args[0]
+        self.assertGreaterEqual(delay, checkin.CHECKIN_OBSERVE_MIN)
+        self.assertLessEqual(delay, checkin.CHECKIN_OBSERVE_MAX)
         post.assert_called_once()
         self.assertEqual(post.call_args.args[0], checkin.DOMAINS[0] + '/api/user/checkin')
         self.assertEqual(post.call_args.kwargs['json'], {
@@ -48,8 +51,8 @@ class ChallengeTests(unittest.TestCase):
         self.assertTrue(checkin.is_normal_checkin_result(result))
 
     @mock.patch('checkin.time.sleep')
-    @mock.patch('checkin.requests.post')
-    @mock.patch('checkin.requests.get')
+    @mock.patch('checkin.requests.Session.post')
+    @mock.patch('checkin.requests.Session.get')
     def test_challenge_fallback_binds_post_and_token_to_issuing_origin(self, get, post, sleep):
         get.side_effect = [response({}, 500), response({'code': 0, 'nonce': NONCE, 'ttl': 300000})]
         post.return_value = response({'code': 0})
@@ -61,8 +64,8 @@ class ChallengeTests(unittest.TestCase):
         self.assertEqual(post.call_args.kwargs['headers']['Origin'], checkin.DOMAINS[1])
 
     @mock.patch('checkin.time.sleep')
-    @mock.patch('checkin.requests.post')
-    @mock.patch('checkin.requests.get')
+    @mock.patch('checkin.requests.Session.post')
+    @mock.patch('checkin.requests.Session.get')
     def test_bad_challenge_never_degrades_to_token_only_checkin(self, get, post, sleep):
         for data in (
             {'code': 2, 'message': 'private error ' + COOKIE},
@@ -80,8 +83,8 @@ class ChallengeTests(unittest.TestCase):
         sleep.assert_not_called()
 
     @mock.patch('checkin.time.sleep')
-    @mock.patch('checkin.requests.post')
-    @mock.patch('checkin.requests.get')
+    @mock.patch('checkin.requests.Session.post')
+    @mock.patch('checkin.requests.Session.get')
     def test_challenge_auth_denial_stops_without_post_or_retry(self, get, post, sleep):
         for data, status in (({'code': -2}, 200), ({}, 403)):
             with self.subTest(status=status):
@@ -96,8 +99,8 @@ class ChallengeTests(unittest.TestCase):
 
     @mock.patch('checkin.time.monotonic', side_effect=[100, 104])
     @mock.patch('checkin.time.sleep')
-    @mock.patch('checkin.requests.post')
-    @mock.patch('checkin.requests.get')
+    @mock.patch('checkin.requests.Session.post')
+    @mock.patch('checkin.requests.Session.get')
     def test_expired_challenge_is_not_submitted(self, get, post, sleep, timer):
         get.return_value = response({'code': 0, 'nonce': NONCE, 'ttl': 3000})
         result = checkin.GLaDOS(COOKIE).checkin()
@@ -105,8 +108,8 @@ class ChallengeTests(unittest.TestCase):
         post.assert_not_called()
 
     @mock.patch('checkin.time.sleep')
-    @mock.patch('checkin.requests.post')
-    @mock.patch('checkin.requests.get')
+    @mock.patch('checkin.requests.Session.post')
+    @mock.patch('checkin.requests.Session.get')
     def test_post_failure_does_not_replay_nonce_on_other_domains(self, get, post, sleep):
         get.return_value = response({'code': 0, 'nonce': NONCE, 'ttl': 300000})
         post.return_value = response({}, 500)
@@ -116,8 +119,8 @@ class ChallengeTests(unittest.TestCase):
         get.assert_called_once()
 
     @mock.patch('checkin.time.sleep')
-    @mock.patch('checkin.requests.post')
-    @mock.patch('checkin.requests.get')
+    @mock.patch('checkin.requests.Session.post')
+    @mock.patch('checkin.requests.Session.get')
     def test_transient_post_failure_obtains_fresh_nonce_for_next_attempt(self, get, post, sleep):
         get.side_effect = [
             response({'code': 0, 'nonce': NONCE, 'ttl': 300000}),
@@ -131,7 +134,12 @@ class ChallengeTests(unittest.TestCase):
         sent = [call.kwargs['json'] for call in post.call_args_list]
         self.assertNotEqual(sent[0]['nonce'], sent[1]['nonce'])
         self.assertNotEqual(sent[0]['proof'], sent[1]['proof'])
-        self.assertEqual(sleep.call_args_list, [mock.call(2.5), mock.call(60), mock.call(2.5)])
+        # A timed-out POST immediately requests a fresh nonce. The 60s outer
+        # backoff is not used when that second submission succeeds.
+        self.assertEqual(len(sleep.call_args_list), 2)
+        for call in sleep.call_args_list:
+            self.assertGreaterEqual(call.args[0], checkin.CHECKIN_OBSERVE_MIN)
+            self.assertLessEqual(call.args[0], checkin.CHECKIN_OBSERVE_MAX)
 
 
 if __name__ == '__main__':

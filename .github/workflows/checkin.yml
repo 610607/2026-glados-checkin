@@ -57,6 +57,15 @@ jobs:
           # Must match the browser that created the current gld:sess.
           # Prefer the repository Variable; accept a same-named Secret for compatibility.
           GLADOS_USER_AGENT: ${{ vars.GLADOS_USER_AGENT || secrets.GLADOS_USER_AGENT }}
+          # Optional per-account overrides (account 1..8). Empty values fall back to GLADOS_USER_AGENT.
+          GLADOS_USER_AGENT_1: ${{ vars.GLADOS_USER_AGENT_1 || secrets.GLADOS_USER_AGENT_1 }}
+          GLADOS_USER_AGENT_2: ${{ vars.GLADOS_USER_AGENT_2 || secrets.GLADOS_USER_AGENT_2 }}
+          GLADOS_USER_AGENT_3: ${{ vars.GLADOS_USER_AGENT_3 || secrets.GLADOS_USER_AGENT_3 }}
+          GLADOS_USER_AGENT_4: ${{ vars.GLADOS_USER_AGENT_4 || secrets.GLADOS_USER_AGENT_4 }}
+          GLADOS_USER_AGENT_5: ${{ vars.GLADOS_USER_AGENT_5 || secrets.GLADOS_USER_AGENT_5 }}
+          GLADOS_USER_AGENT_6: ${{ vars.GLADOS_USER_AGENT_6 || secrets.GLADOS_USER_AGENT_6 }}
+          GLADOS_USER_AGENT_7: ${{ vars.GLADOS_USER_AGENT_7 || secrets.GLADOS_USER_AGENT_7 }}
+          GLADOS_USER_AGENT_8: ${{ vars.GLADOS_USER_AGENT_8 || secrets.GLADOS_USER_AGENT_8 }}
           CHECKIN_DIAGNOSTIC_ONLY: ${{ inputs.diagnose_only && 'true' || 'false' }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}

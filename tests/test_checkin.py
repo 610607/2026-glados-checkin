@@ -195,7 +195,7 @@ class CookieTests(unittest.TestCase):
             'gld:sess=current; gld:sess.sig=signature',
         )
 
-    @mock.patch('checkin.requests.get')
+    @mock.patch('checkin.requests.Session.get')
     def test_full_cookie_header_is_forwarded_to_api(self, request_get):
         response = mock.Mock(status_code=200)
         response.json.return_value = {'code': 0, 'data': {}}
@@ -281,7 +281,7 @@ class AutoExchangeTests(unittest.TestCase):
 
 class DiagnosticTests(unittest.TestCase):
     @mock.patch('checkin.log')
-    @mock.patch('checkin.requests.get')
+    @mock.patch('checkin.requests.Session.get')
     def test_request_error_does_not_expose_cookie(self, request_get, log):
         cookie = 'gld:sess=private-cookie; gld:sess.sig=private-signature'
         request_get.side_effect = checkin.requests.exceptions.InvalidHeader(cookie)

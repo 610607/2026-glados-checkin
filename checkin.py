@@ -12,11 +12,13 @@
 - 支持 Cookie-Editor 导出格式
 """
 
-import html
 import hashlib
+import html
+import http.cookiejar
 import json
 import math
 import os
+import random
 import re
 import sys
 import time
@@ -24,6 +26,8 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Fix Windows Unicode Output
 if sys.platform.startswith('win'):
@@ -61,7 +65,33 @@ NORMAL_CHECKIN_MESSAGES = (
 
 # The current official console obtains a fresh challenge, waits at least 2.5 s,
 # and sends SHA-256(nonce + ".glados-observe-v1") with the check-in request.
+# Stay strictly above that floor and add a short human-like jitter.
 CHECKIN_CHALLENGE_DELAY = 2.5
+CHECKIN_OBSERVE_MIN = 2.8
+CHECKIN_OBSERVE_MAX = 4.0
+CHECKIN_PROOF_SUFFIX = '.glados-observe-v1'
+SCHEDULE_JITTER_MIN = 5
+SCHEDULE_JITTER_MAX = 45
+
+# Official console map: 0/10 Free, 11 Education, 21 Basic, 31 Pro, 41 Team, 51 Enterprise.
+VIP_LABELS = {
+    0: 'Free',
+    10: 'Free',
+    11: 'Edu',
+    21: 'Basic',
+    31: 'Pro',
+    41: 'Team',
+    51: 'Enterprise',
+}
+VIP_NAMES = {
+    'free': 'Free',
+    'edu': 'Edu',
+    'education': 'Edu',
+    'basic': 'Basic',
+    'pro': 'Pro',
+    'team': 'Team',
+    'enterprise': 'Enterprise',
+}
 
 # 积分兑换计划 (#11)：消耗 points 积分兑换 days 天会员。
 # 通过环境变量 EXCHANGE_PLAN 选择，默认 plan500（500 分兑换 100 天），
@@ -79,19 +109,46 @@ LEGACY_SESSION_COOKIES = ('koa:sess', 'koa:sess.sig')
 
 # ================= 工具函数 =================
 
+def get_beijing_time():
+    """Timezone-aware Beijing time (UTC+8)."""
+    return datetime.now(timezone(timedelta(hours=8)))
+
+
 def beijing_time():
-    return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+    return get_beijing_time().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def log(msg):
     print(f"[{beijing_time()} 北京时间] {msg}")
 
+def sanitize_cookie(raw):
+    """Drop copied wrappers. Return None when the value cannot be a header."""
+    if not isinstance(raw, str):
+        return None
+    # Requests encodes headers as latin-1; non-ASCII here crashes the run.
+    if any(ord(char) > 127 for char in raw):
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    value = re.sub(r'^(?i:cookie)\s*:\s*', '', value).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
+        inner = value[1:-1].strip()
+        if inner:
+            value = re.sub(r'^(?i:cookie)\s*:\s*', '', inner).strip()
+    if not value or any(ord(char) > 127 for char in value):
+        return None
+    # JSON exports may contain newlines. A Cookie header must not.
+    if not value.lstrip().startswith(('{', '[')) and any(ord(char) < 32 for char in value):
+        return None
+    return value
+
+
 def extract_cookie(raw: str):
     """提取 Cookie，支持请求头及 Cookie-Editor JSON 导出格式。"""
+    raw = sanitize_cookie(raw)
     if not raw:
         return None
-    raw = raw.strip()
-    raw = re.sub(r'^cookie\s*:\s*', '', raw, flags=re.IGNORECASE)
     
     # GLaDOS 2026 新会话与旧 Koa 会话的 Cookie 请求头格式。
     if any(f'{name}=' in raw for name in CURRENT_SESSION_COOKIES + LEGACY_SESSION_COOKIES):
@@ -155,11 +212,23 @@ def get_cookies():
     # and ampersands inside values are not account separators.
     if raw.lstrip().startswith(('{', '[')):
         cookie = extract_cookie(raw)
+        if cookie is None and any(ord(char) > 127 for char in raw):
+            log("❌ Cookie 含有非 ASCII 字符，已跳过该账号")
         return [cookie] if cookie else []
-    
+
     # Split by enter or &
     sep = '\n' if '\n' in raw else '&'
-    return [cookie for item in raw.split(sep) if (cookie := extract_cookie(item))]
+    cookies = []
+    skipped_non_ascii = False
+    for item in raw.split(sep):
+        if any(ord(char) > 127 for char in item):
+            skipped_non_ascii = True
+        cookie = extract_cookie(item)
+        if cookie:
+            cookies.append(cookie)
+    if skipped_non_ascii:
+        log("❌ Cookie 含有非 ASCII 字符，已跳过对应账号")
+    return cookies
 
 
 class UserAgentConfigurationError(ValueError):
@@ -211,9 +280,11 @@ def normalize_user_agent(raw):
     return value, value != original
 
 
-def get_browser_headers():
+def get_browser_headers(user_agent_raw=None):
     """Build headers matching the browser that created the login session."""
-    user_agent, _ = normalize_user_agent(os.environ.get("GLADOS_USER_AGENT", ""))
+    if user_agent_raw is None:
+        user_agent_raw = os.environ.get("GLADOS_USER_AGENT", "")
+    user_agent, _ = normalize_user_agent(user_agent_raw)
     user_agent = user_agent or DEFAULT_USER_AGENT
     headers = {'User-Agent': user_agent}
 
@@ -253,6 +324,7 @@ def is_non_retryable_checkin_result(result):
     message = str(result.get('message', '')).strip().lower()
     return (
         code == -2
+        or code == 4
         or result.get('http_status') in (401, 403)
         or reason == 'device-mismatch'
         or '没有权限' in message
@@ -273,6 +345,7 @@ def summarize_checkin_failure(result):
 
     reason = str(result.get('reason', '')).strip().lower()
     message = str(result.get('message', '')).strip().lower()
+    code = result.get('code')
     if reason == 'checkin-challenge-unavailable':
         label = '未获取有效签到验证，本次未提交签到，请稍后重试'
     elif reason == 'checkin-challenge-expired':
@@ -289,13 +362,14 @@ def summarize_checkin_failure(result):
         label = '服务端拒绝设备校验；请核对会话和 User-Agent 配置'
     elif 'automated check-in detected' in message:
         label = '服务端拒绝自动签到；请核对会话配置，仍失败时联系服务方'
+    elif code == 4:
+        label = '服务端拒绝设备校验；请核对会话和 User-Agent 配置'
     elif is_non_retryable_checkin_result(result):
         label = '服务端拒绝会话认证或访问'
     else:
         label = '签到失败'
 
     details = []
-    code = result.get('code')
     if type(code) is int and -999 <= code <= 999:
         details.append(f'code={code}')
     status = result.get('http_status')
@@ -357,19 +431,186 @@ def checkin_with_retry(client, attempts=3, delay_seconds=60):
 
     return last_result, False
 
+
+def format_points(value):
+    """Format a points value, keeping a single decimal for Team .5 awards."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    scaled = round(number * 10) / 10
+    if abs(scaled - round(scaled)) < 1e-9:
+        return str(int(round(scaled)))
+    return f'{scaled:.1f}'
+
+
+def format_streak(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return str(int(number))
+
+
+def vip_label(vip, level=None):
+    """Map official vip/level fields to Free/Edu/Basic/Pro/Team/Enterprise."""
+    for candidate in (level, vip):
+        if isinstance(candidate, str):
+            mapped = VIP_NAMES.get(candidate.strip().lower())
+            if mapped:
+                return mapped
+    if isinstance(vip, str) and vip.strip().lstrip('-').isdigit():
+        try:
+            vip = int(vip.strip())
+        except ValueError:
+            return '?'
+    if isinstance(vip, float) and math.isfinite(vip) and vip.is_integer():
+        vip = int(vip)
+    if type(vip) is int:
+        return VIP_LABELS.get(vip, '?')
+    return '?'
+
+
+def is_expired_status(result, data=None):
+    """Official /api/user/status uses code -101, and some payloads use leftDays -101."""
+    if isinstance(result, dict) and result.get('code') == -101:
+        return True
+    days = data.get('leftDays') if isinstance(data, dict) else None
+    if isinstance(days, str):
+        days = days.strip()
+    try:
+        return float(days) == -101
+    except (TypeError, ValueError):
+        return False
+
+
+def compute_checkin_proof(nonce):
+    return hashlib.sha256((nonce + CHECKIN_PROOF_SUFFIX).encode('utf-8')).hexdigest()
+
+
+def checkin_observe_delay():
+    """Random wait in [2.8, 4.0], always above the official 2.5s floor."""
+    delay = random.uniform(CHECKIN_OBSERVE_MIN, CHECKIN_OBSERVE_MAX)
+    return min(CHECKIN_OBSERVE_MAX, max(CHECKIN_OBSERVE_MIN, delay))
+
+
+def maybe_sleep_schedule_jitter():
+    """Spread GitHub Actions schedule runs. Manual and external dispatches do not wait."""
+    if os.environ.get('GITHUB_EVENT_NAME', '').strip() != 'schedule':
+        return 0.0
+    delay = random.uniform(SCHEDULE_JITTER_MIN, SCHEDULE_JITTER_MAX)
+    delay = min(SCHEDULE_JITTER_MAX, max(SCHEDULE_JITTER_MIN, delay))
+    log(f'定时触发随机延迟 {delay:.0f} 秒')
+    time.sleep(delay)
+    return delay
+
+
+def prepare_account_user_agent(index):
+    """Return (raw_override_or_None, error_or_None) for GLADOS_USER_AGENT_N."""
+    raw = os.environ.get(f'GLADOS_USER_AGENT_{index}', '')
+    if not str(raw).strip():
+        return None, None
+    try:
+        value, normalized = normalize_user_agent(raw)
+    except UserAgentConfigurationError as error:
+        return None, str(error)
+    if not value:
+        return None, None
+    note = '已配置独立值'
+    if normalized:
+        note += '（已自动去除外层引号或请求头名称）'
+    log(f'账号 {index} 浏览器 User-Agent: {note}')
+    return raw, None
+
+
+class _RejectCookies(http.cookiejar.DefaultCookiePolicy):
+    """Keep the account Cookie on the explicit header, not the shared cookie jar."""
+
+    def set_ok(self, cookie, request):
+        return False
+
+
+def create_session():
+    """Reuse TCP/TLS for one account. Retry idempotent GETs once; never retry POST."""
+    session = requests.Session()
+    session.cookies.set_policy(_RejectCookies())
+    retry = Retry(
+        total=1,
+        connect=1,
+        read=1,
+        status=0,
+        redirect=0,
+        raise_on_status=False,
+        allowed_methods=frozenset(['GET', 'HEAD', 'OPTIONS']),
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=4, pool_maxsize=4)
+    session.mount('https://', adapter)
+    session.mount('http://', adapter)
+    return session
+
+
+def known_text(value):
+    """Return a real display string. Ignore missing fields on test doubles."""
+    if isinstance(value, str) and value != '?':
+        return value
+    return None
+
+
+def apply_checkin_details(client, result):
+    """Read earned points, streak and balance from a check-in payload."""
+    if not isinstance(result, dict):
+        return
+    earned = format_points(result.get('points'))
+    if earned is not None:
+        client.points_earned = earned
+    streak = format_streak(result.get('streak'))
+    if streak is not None:
+        client.streak = streak
+    listing = result.get('list')
+    if isinstance(listing, list) and listing and isinstance(listing[0], dict):
+        balance = format_points(listing[0].get('balance'))
+        if balance is not None:
+            client.points = balance
+
+
+def _post_timed_out(result):
+    return (
+        isinstance(result, dict)
+        and result.get('request_failed') is True
+        and result.get('timed_out') is True
+        and result.get('method') == 'POST'
+    )
+
 # ================= 核心逻辑 =================
 
 class GLaDOS:
-    def __init__(self, cookie):
+    def __init__(self, cookie, user_agent=None):
         self.cookie = cookie
+        self.user_agent_raw = user_agent
         self.domain = DOMAINS[0]
         self.email = "?"
         self.left_days = "?"
         self.points = "?"
         self.points_change = "?"
+        self.points_earned = "?"
+        self.streak = "?"
         self.exchange_info = ""
         self.exchange_result = ""
         self.plan = "?"
+        self.expired = False
+        self.session = create_session()
         self.session_cookie_kind = get_session_cookie_kind(cookie)
         if self.session_cookie_kind != 'gld':
             log(
@@ -380,9 +621,9 @@ class GLaDOS:
     def req(self, method, path, data=None, form=False, domains=None):
         """带自动域名切换的请求；form=True 时以表单提交（兑换接口要求）"""
         # Validate local configuration before the retry loop or any network request.
-        browser_headers = get_browser_headers()
+        browser_headers = get_browser_headers(self.user_agent_raw)
         # Keep only fixed, non-secret failure metadata after all domains fail.
-        failure = {'request_failed': True, 'reason': 'request-failed'}
+        failure = {'request_failed': True, 'reason': 'request-failed', 'method': method}
         for d in DOMAINS if domains is None else domains:
             try:
                 url = f"{d}{path}"
@@ -396,11 +637,13 @@ class GLaDOS:
                     # 表单提交交给 requests 自动设置 Content-Type，
                     # 手动预设 JSON 头会被兑换接口拒绝。
                     h.pop('Content-Type', None)
-                    resp = requests.post(url, headers=h, data=data, timeout=10)
+                    resp = self.session.post(url, headers=h, data=data, timeout=10)
                 elif method == 'GET':
-                    resp = requests.get(url, headers=h, timeout=10)
+                    # GET does not need a JSON Content-Type; omit it.
+                    h.pop('Content-Type', None)
+                    resp = self.session.get(url, headers=h, timeout=10)
                 else:
-                    resp = requests.post(url, headers=h, json=data, timeout=10)
+                    resp = self.session.post(url, headers=h, json=data, timeout=10)
 
                 if resp.status_code == 200:
                     payload = resp.json()
@@ -432,49 +675,68 @@ class GLaDOS:
         return failure
 
     def get_status(self):
-        """获取状态：天数、邮箱"""
+        """获取状态：天数、邮箱、套餐。code/-101 或 leftDays=-101 视为已过期。"""
         res = self.req('GET', '/api/user/status')
-        if res and 'data' in res:
-            d = res['data']
-            self.email = d.get('email', 'Unknown')
-            self.left_days = str(d.get('leftDays', '?')).split('.')[0]
+        if not isinstance(res, dict):
+            return False
+        data = res.get('data') if isinstance(res.get('data'), dict) else None
+        if data is not None:
+            self.email = data.get('email', 'Unknown')
+            self.plan = vip_label(data.get('vip'), data.get('level'))
+        if is_expired_status(res, data):
+            self.expired = True
+            self.left_days = '已过期'
+            return True
+        if data is not None:
+            self.left_days = str(data.get('leftDays', '?')).split('.')[0]
             return True
         return False
 
     def get_points(self):
-        """获取积分、变化历史、兑换计划"""
+        """获取积分、变化历史、连签与兑换计划。保留 Team 套餐的 .5 分。"""
         res = self.req('GET', '/api/user/points')
         if res and 'points' in res:
-            # 当前积分
-            self.points = str(res.get('points', '0')).split('.')[0]
-            
+            formatted = format_points(res.get('points'))
+            self.points = formatted if formatted is not None else str(res.get('points', '0')).split('.')[0]
+
+            streak = format_streak(res.get('streak'))
+            if streak is not None:
+                self.streak = streak
+
             # 最近一次积分变化
             history = res.get('history', [])
-            if history:
+            if history and isinstance(history[0], dict):
                 last = history[0]
-                change = str(last.get('change', '0')).split('.')[0]
-                if not change.startswith('-'):
-                    change = '+' + change
+                change = format_points(last.get('change'))
+                if change is None:
+                    change = str(last.get('change', '0')).split('.')[0]
+                if not str(change).startswith('-'):
+                    change = '+' + str(change)
                 self.points_change = change
-            
+
             # 兑换计划
             plans = res.get('plans', {})
-            pts = int(float(self.points))
+            try:
+                balance = float(self.points)
+            except (TypeError, ValueError):
+                balance = 0.0
             exchange_lines = []
             for plan_data in plans.values():
                 need = int(plan_data.get('points', 0))
                 days = plan_data.get('days', '?')
-                if pts >= need:
+                if balance >= need:
                     exchange_lines.append(f"✅ {need}分→{days}天 (可兑换)")
                 else:
-                    exchange_lines.append(f"❌ {need}分→{days}天 (差{need-pts}分)")
+                    gap = format_points(need - balance) or str(need - int(balance))
+                    exchange_lines.append(f"❌ {need}分→{days}天 (差{gap}分)")
             self.exchange_info = "<br>".join(exchange_lines)
             return True
         return False
 
-    def checkin(self):
-        """执行签到"""
+    def _checkin_once(self):
+        """One challenge → observe → proof submission. Never logs nonce or proof."""
         challenge = self.req('GET', '/api/user/checkin/challenge')
+        # Cookie expired (code -2) and device-mismatch (code 4) fail before the wait.
         if is_non_retryable_checkin_result(challenge) or is_missing_api_response(challenge):
             return challenge
         nonce = challenge.get('nonce')
@@ -492,8 +754,8 @@ class GLaDOS:
         # on another domain; the outer retry obtains a fresh challenge instead.
         domain = self.domain
         received_at = time.monotonic()
-        proof = hashlib.sha256((nonce + '.glados-observe-v1').encode('utf-8')).hexdigest()
-        time.sleep(CHECKIN_CHALLENGE_DELAY)
+        proof = compute_checkin_proof(nonce)
+        time.sleep(checkin_observe_delay())
         if (time.monotonic() - received_at) * 1000 >= ttl:
             return {'request_failed': True, 'reason': 'checkin-challenge-expired'}
         return self.req('POST', '/api/user/checkin', {
@@ -501,6 +763,14 @@ class GLaDOS:
             'nonce': nonce,
             'proof': proof,
         }, domains=(domain,))
+
+    def checkin(self):
+        """执行签到。POST 超时则重新申请 nonce 并立即再试一次。"""
+        result = self._checkin_once()
+        if _post_timed_out(result):
+            log('⚠️ 签到提交超时，重新获取验证后重试一次')
+            result = self._checkin_once()
+        return result
 
     def exchange(self, plan):
         """兑换会员天数：表单提交 planType (plan100/plan200/plan500)"""
@@ -662,7 +932,11 @@ def diagnose_accounts(cookies):
     if not log_user_agent_configuration():
         return 1
     for i, cookie in enumerate(cookies, 1):
-        client = GLaDOS(cookie)
+        user_agent, error = prepare_account_user_agent(i)
+        if error:
+            log(f'❌ 账号 {i} User-Agent 配置错误: {error}')
+            continue
+        client = GLaDOS(cookie, user_agent=user_agent)
         result = client.req('GET', '/api/user/status')
         authenticated = (
             isinstance(result, dict)
@@ -690,6 +964,8 @@ def main():
     if not cookies:
         return 1
 
+    maybe_sleep_schedule_jitter()
+
     if os.environ.get('CHECKIN_DIAGNOSTIC_ONLY', '').strip().lower() in ('1', 'true', 'yes'):
         return diagnose_accounts(cookies)
 
@@ -707,7 +983,17 @@ def main():
     exchange_events = 0
 
     for i, cookie in enumerate(cookies, 1):
-        g = GLaDOS(cookie)
+        user_agent, ua_error = prepare_account_user_agent(i)
+        if ua_error:
+            log(f'❌ 账号 {i} User-Agent 配置错误: {ua_error}')
+            results.append(f"""
+<div style="border:2px solid #333; padding:15px; margin-bottom:15px; border-radius:10px; background:#fff;">
+    <h3 style="margin:0 0 15px 0; color:#333; border-bottom:2px solid #333; padding-bottom:8px;">👤 账号 {i}</h3>
+    <p style="margin:8px 0; color:#000; font-size:16px;"><b>签到结果:</b> {html.escape('User-Agent 配置错误: ' + ua_error)}</p>
+</div>
+""")
+            continue
+        g = GLaDOS(cookie, user_agent=user_agent)
 
         # 1. Checkin
         attempts = int(os.environ.get("CHECKIN_MAX_ATTEMPTS", "3"))
@@ -722,7 +1008,9 @@ def main():
             # Do not add more reads or attempt redemption during a transport outage.
             g.exchange_result = '⏭️ 本次请求失败，跳过积分查询和兑换'
         else:
-            # 2. Get Info (Refresh data)
+            # 2. Check-in payload first, then /api/user/points fills balance and streak
+            # when a repeat response omits them.
+            apply_checkin_details(g, res)
             g.get_status()
             g.get_points()
 
@@ -737,7 +1025,17 @@ def main():
         status_icon = "✅" if is_success else "❌"
         # Actions logs are public in a public repository. Keep account details
         # inside the private notification instead of exposing the email here.
-        log(f"{status_icon} 账号 {i} | 积分: {g.points} | 天数: {g.left_days} | 结果: {msg}")
+        earned = ''
+        earned_value = known_text(getattr(g, 'points_earned', None))
+        if earned_value:
+            earned_text = earned_value if earned_value.startswith(('+', '-')) else f'+{earned_value}'
+            earned = f' | 本次: {earned_text}'
+        plan_text = known_text(getattr(g, 'plan', None)) or '?'
+        streak_text = known_text(getattr(g, 'streak', None)) or '?'
+        log(
+            f"{status_icon} 账号 {i} | 套餐: {plan_text} | 积分: {g.points} | "
+            f"连签: {streak_text} | 天数: {g.left_days}{earned} | 结果: {msg}"
+        )
 
         if is_success:
             success_cnt += 1
@@ -746,7 +1044,19 @@ def main():
         account_label = str(g.email) if g.email != '?' else f'账号 {i}'
         points_label = str(g.points) if g.points != '?' else '未获取'
         change_label = f'({g.points_change})' if g.points_change != '?' else ''
-        days_label = f'{g.left_days} 天' if g.left_days != '?' else '未获取'
+        if getattr(g, 'expired', False) is True or g.left_days == '已过期':
+            days_label = '已过期'
+        elif isinstance(g.left_days, str) and g.left_days != '?':
+            days_label = f'{g.left_days} 天'
+        else:
+            days_label = '未获取'
+        plan_label = known_text(getattr(g, 'plan', None)) or '未获取'
+        streak_value = known_text(getattr(g, 'streak', None))
+        streak_label = f'{streak_value} 天' if streak_value else '未获取'
+        earned_line = ''
+        if earned_value:
+            earned_line = f"""
+    <p style="margin:8px 0; color:#000; font-size:16px;"><b>本次积分:</b> {html.escape(earned_text)}</p>"""
         exchange_line = ""
         if exchange_plan:
             exchange_line = f"""
@@ -754,8 +1064,10 @@ def main():
         results.append(f"""
 <div style="border:2px solid #333; padding:15px; margin-bottom:15px; border-radius:10px; background:#fff;">
     <h3 style="margin:0 0 15px 0; color:#333; border-bottom:2px solid #333; padding-bottom:8px;">👤 {html.escape(account_label)}</h3>
+    <p style="margin:8px 0; color:#000; font-size:16px;"><b>套餐:</b> {html.escape(plan_label)}</p>
     <p style="margin:8px 0; color:#000; font-size:16px;"><b>当前积分:</b> <span style="color:#e74c3c; font-size:22px; font-weight:bold;">{html.escape(points_label)}</span> <span style="color:#27ae60; font-weight:bold;">{html.escape(change_label)}</span></p>
-    <p style="margin:8px 0; color:#000; font-size:16px;"><b>剩余天数:</b> <span style="font-weight:bold;">{html.escape(days_label)}</span></p>
+    <p style="margin:8px 0; color:#000; font-size:16px;"><b>连签:</b> {html.escape(streak_label)}</p>
+    <p style="margin:8px 0; color:#000; font-size:16px;"><b>剩余天数:</b> <span style="font-weight:bold;">{html.escape(days_label)}</span></p>{earned_line}
     <p style="margin:8px 0; color:#000; font-size:16px;"><b>签到结果:</b> {html.escape(str(msg))}</p>{exchange_line}
     <div style="margin-top:15px; padding:12px; background:#f0f0f0; border-radius:8px; border:1px solid #ccc;">
         <p style="margin:0 0 8px 0; color:#333; font-weight:bold; font-size:15px;">🎁 兑换选项:</p>

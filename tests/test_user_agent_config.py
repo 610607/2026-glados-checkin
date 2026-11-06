@@ -110,8 +110,8 @@ class UserAgentFlowTests(unittest.TestCase):
     def test_normalized_value_reaches_get_json_post_and_form_post(self):
         for raw in (USER_AGENT, '"' + USER_AGENT + '"', 'User-Agent: ' + USER_AGENT):
             with self.subTest(raw=raw), mock.patch.dict(os.environ, {'GLADOS_USER_AGENT': raw}), \
-                    mock.patch('checkin.requests.get') as get, \
-                    mock.patch('checkin.requests.post') as post:
+                    mock.patch('checkin.requests.Session.get') as get, \
+                    mock.patch('checkin.requests.Session.post') as post:
                 for call in (get, post):
                     call.return_value = mock.Mock(status_code=200)
                     call.return_value.json.return_value = {'code': 0, 'data': {'leftDays': 1}}
@@ -135,8 +135,8 @@ class UserAgentFlowTests(unittest.TestCase):
 
     def test_invalid_configuration_stops_direct_request_before_http(self):
         with mock.patch.dict(os.environ, {'GLADOS_USER_AGENT': USER_AGENT + '\nBroken'}), \
-                mock.patch('checkin.requests.get') as get, \
-                mock.patch('checkin.requests.post') as post, \
+                mock.patch('checkin.requests.Session.get') as get, \
+                mock.patch('checkin.requests.Session.post') as post, \
                 mock.patch('checkin.time.sleep') as sleep:
             with self.assertRaises(checkin.UserAgentConfigurationError):
                 checkin.checkin_with_retry(checkin.GLaDOS(COOKIE))
