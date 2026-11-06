@@ -26,11 +26,16 @@ class OfflineTestCase(unittest.TestCase):
 
 class AuthFailureTests(OfflineTestCase):
     @mock.patch('checkin.time.sleep')
-    @mock.patch('checkin.requests.post')
-    def test_http_auth_denial_stops_domain_fallback_and_checkin_retries(self, post, sleep):
+    @mock.patch('checkin.requests.Session.post')
+    @mock.patch('checkin.requests.Session.get')
+    def test_http_auth_denial_stops_domain_fallback_and_checkin_retries(self, get, post, sleep):
         for status in (401, 403):
             with self.subTest(status=status), mock.patch.dict(os.environ, {}, clear=True):
                 post.reset_mock()
+                get.reset_mock()
+                sleep.reset_mock()
+                get.return_value = mock.Mock(status_code=200)
+                get.return_value.json.return_value = {'code': 0, 'nonce': 'synthetic-nonce', 'ttl': 300000}
                 response = mock.Mock(status_code=status)
                 response.json.side_effect = ValueError('synthetic private response body')
                 post.return_value = response
@@ -40,8 +45,12 @@ class AuthFailureTests(OfflineTestCase):
                 self.assertFalse(success)
                 self.assertEqual(result['http_status'], status)
                 self.assertEqual(post.call_count, 1)
+                self.assertEqual(get.call_count, 1)
                 response.json.assert_not_called()
-                sleep.assert_not_called()
+                sleep.assert_called_once()
+                delay = sleep.call_args.args[0]
+                self.assertGreaterEqual(delay, checkin.CHECKIN_OBSERVE_MIN)
+                self.assertLessEqual(delay, checkin.CHECKIN_OBSERVE_MAX)
 
     def test_explicit_auth_denial_overrides_success_code_or_message(self):
         for result in (
@@ -73,7 +82,7 @@ class AuthFailureTests(OfflineTestCase):
                       'untrusted-private-reason'):
             self.assertNotIn(value, output)
 
-    @mock.patch('checkin.requests.get')
+    @mock.patch('checkin.requests.Session.get')
     def test_transient_http_error_still_falls_back_to_next_domain(self, get):
         unavailable = mock.Mock(status_code=503)
         ok = mock.Mock(status_code=200)
@@ -87,8 +96,12 @@ class AuthFailureTests(OfflineTestCase):
         self.assertEqual(get.call_count, 2)
         self.assertEqual(client.domain, checkin.DOMAINS[1])
 
-    @mock.patch('checkin.requests.post')
-    def test_configured_cookie_and_user_agent_reach_checkin_request(self, post):
+    @mock.patch('checkin.requests.Session.post')
+    @mock.patch('checkin.requests.Session.get')
+    @mock.patch('checkin.time.sleep')
+    def test_configured_cookie_and_user_agent_reach_checkin_request(self, sleep, get, post):
+        get.return_value = mock.Mock(status_code=200)
+        get.return_value.json.return_value = {'code': 0, 'nonce': 'synthetic-nonce', 'ttl': 300000}
         post.return_value = mock.Mock(status_code=200)
         post.return_value.json.return_value = DENIAL
         with mock.patch.dict(os.environ, {'GLADOS_USER_AGENT': USER_AGENT}, clear=True):
@@ -188,11 +201,11 @@ class AuthMainTests(OfflineTestCase):
                 self.assertNotIn(USER_AGENT, output)
 
     @mock.patch('checkin.log')
-    @mock.patch('checkin.requests.get')
+    @mock.patch('checkin.requests.Session.get')
     def test_read_only_diagnostic_reports_http_denial_without_writes(self, get, log):
         get.return_value = mock.Mock(status_code=403)
         with mock.patch.dict(os.environ, {}, clear=True), \
-                mock.patch('checkin.requests.post') as post:
+                mock.patch('checkin.requests.Session.post') as post:
             result = checkin.diagnose_accounts([COOKIE])
 
         self.assertEqual(result, 1)

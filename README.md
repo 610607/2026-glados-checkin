@@ -67,6 +67,15 @@
 
 ---
 
+## 使用说明与免责声明
+
+本项目为非官方社区辅助工具。使用前请阅读以下说明，并确认自己的部署方式符合所用平台的要求。
+
+- **账号与平台规则**：仅用于本人或已获明确授权的账号，遵守适用法律法规以及 GLaDOS、GitHub 和所选推送服务的服务条款。请自行确认平台是否允许相应的自动化使用方式。
+- **运行与奖励限制**：接口、验证流程、积分规则、服务额度和访问策略可能发生变化。测试通过或维护者账号运行成功，不构成持续可用、固定积分、补发差额、兑换成功或账号权益不受影响的保证；签到和奖励以平台实际记录为准。
+- **凭据与通知隐私**：请妥善保管 Cookie、Token、SendKey 等凭据，GitHub 部署时使用 Secrets，不要提交到代码、公开日志或 Issue。通知触发时，签到摘要可能包含邮箱、积分和剩余天数，并会发送给你配置的推送服务；配置前请了解该服务的数据处理规则。
+- **风险与责任范围**：本项目按“现状”提供。在适用法律允许的范围内，维护者和贡献者不对使用本项目产生的服务中断、数据或凭据泄露、积分及账号权益损失等承担赔偿责任。本说明不排除依法不得免除的责任。
+
 ## 💡 重要说明
 
 > 默认只使用仓库内置的 **GitHub Actions** 定时任务，无需创建外部 cron。
@@ -151,7 +160,7 @@ GLaDOS 在 2026 年初进行了 API 更新，**绝大多数旧签到脚本已失
 | 🎁 **兑换提示** | 显示当前可兑换选项及差额        |
 | ⏰ **每日一次** | 北京时间 9:30 自动签到          |
 | 🔄 **失败重试** | 最多尝试三次，最终失败才报警    |
-| 📱 **微信推送** | PushPlus 漂亮 HTML 报告         |
+| 📱 **微信推送** | PushPlus HTML 报告 / Server酱 Markdown 报告 |
 | ☁️ **2026 API** | 适配最新 glados.cloud API       |
 | 🔧 **持续维护** | 发现问题及时修复                |
 
@@ -164,12 +173,16 @@ GLaDOS 在 2026 年初进行了 API 更新，**绝大多数旧签到脚本已失
 | 变量名               | 必填  | 说明                                                                       |
 | -------------------- | ----- | -------------------------------------------------------------------------- |
 | `GLADOS_COOKIE`      | ✅ 是 | GLaDOS 的完整 Cookie，必须包含 `gld:sess` 与 `gld:sess.sig`。多个账号请用 `&` 或换行符分隔。 |
-| `GLADOS_USER_AGENT`  | ❌ 否 | 生成当前 `gld:sess` 时浏览器的完整 User-Agent；新版设备校验失败时需要配置。 |
+| `GLADOS_USER_AGENT`  | ❌ 否 | 生成当前 `gld:sess` 时浏览器的完整 User-Agent；新版设备校验失败时需要配置。多个账号可共用这一条。 |
+| `GLADOS_USER_AGENT_N` | ❌ 否 | 第 N 个账号的独立 User-Agent（`GLADOS_USER_AGENT_1` 起）。未设置的账号继续使用 `GLADOS_USER_AGENT`。Actions 工作流已转发 1–8；本地可设置更大的 N。 |
 | `PUSHPLUS_TOKEN`     | ❌ 否 | PushPlus 微信推送 Token。                                                  |
+| `SERVERCHAN_SENDKEY` | ❌ 否 | Server酱 SendKey，支持 Turbo（`SCT...`）与 Server酱³（`sctp...`）。         |
 | `TELEGRAM_BOT_TOKEN` | ❌ 否 | Telegram 机器人的 Token（例如 `123456:ABC-DEF1234...`）                    |
 | `TELEGRAM_CHAT_ID`   | ❌ 否 | 接收推送的 Telegram Chat ID                                                |
 | `PUSH_LEVEL`         | ❌ 否 | 推送级别：`fail_only`（默认，仅失败推送）或 `all`（每次均推送）            |
 | `EXCHANGE_PLAN`      | ❌ 否 | 积分自动兑换计划（#11）：`plan500`（默认，500 分自动兑换 100 天）、`plan200`（200 分→30 天）、`plan100`（100 分→10 天）或 `off`（关闭）。兑换结果即使 `PUSH_LEVEL=fail_only` 也会推送。 |
+
+PushPlus、Server酱和 Telegram 均为可选，可单独使用，也可同时配置；多个渠道配置后会分别发送同一份多账号汇总，并遵循同一个 `PUSH_LEVEL` 设置。只读诊断（`diagnose_only`）不发送推送。
 
 ### 🍪 2026 年 9 月新版会话 Cookie
 
@@ -198,9 +211,16 @@ Cookie、邮箱或账号余额，也不会签到、兑换积分或发送推送�
 完整 Cookie 与 User-Agent 都已配置但仍失败时，请先核对以下信息：
 
 - 普通签到和只读诊断都会显示 `浏览器 User-Agent: 已配置` 或 `未配置，使用默认值`，
-  只显示是否配置，不输出具体值。Actions 从 **Variables** 读取 `GLADOS_USER_AGENT`；
-  如果只把它放在 **Secrets**，当前工作流不会读取。显示“已配置”也只证明值已传入，
-  不证明它与当前登录会话匹配。
+  不输出具体值。Actions 优先读取 **Variables** 中的 `GLADOS_USER_AGENT`；Variable
+  未设置或为空时，兼容读取同名 **Secret**。两处都配置时以 Variable 为准，更新时请注意
+  不要留下旧的 Variable。只含空格的 Variable 也会优先于 Secret，随后使用默认值；
+  请清空或删除它。两处都为空时仍使用默认值。同步工作流后此兼容才会生效。
+- 推荐只粘贴完整单行 User-Agent 的值，不要附带说明文字。脚本可自动去掉一对完整的
+  英文外层双引号及误复制的 `User-Agent:` 前缀；包含空格的完整浏览器值也兼容一对
+  英文外层单引号。自定义单个产品标识中的合法单引号会保留，只记录已规范化，不打印内容。
+  含内嵌换行、无效控制字符、不支持的字符、重复引号或不成对双引号时，会在任何账号请求、
+  签到、兑换和推送前报配置错误并停止，请重新复制对应浏览器的值。
+  显示“已配置”只证明配置已传入并通过本地格式检查，不证明它与当前登录会话匹配。
 - 提供失败运行的链接（或 commit SHA）、浏览器名称/版本、GitHub Actions 或本地运行、
   是否多账号，以及 `diagnose_only` 是否通过。日志中的 `code`、已知 `reason` 和
   `http_status` 可以帮助区分会话拒绝与网络错误。请勿公开 Cookie、Token、完整请求头或
@@ -215,6 +235,21 @@ Cookie、邮箱或账号余额，也不会签到、兑换积分或发送推送�
 `Automated check-in detected` 是服务端的拒绝结果，仅凭这句文案不能确定具体触发条件，
 也不能保证设置 User-Agent 后必然恢复。只读查询通过但实际签到仍被拒绝时，请保留脱敏
 结果并联系服务方确认会话或自动化使用策略，不要反复触发签到。
+
+### 签到只获得 1 积分（#28）
+
+2026-11-06 已核对官网控制台的新流程：签到前会获取一次性 challenge，等待后提交对应的
+nonce/proof。旧脚本仅提交 token，缺少这一步；请同步最新 `checkin.py`。新版本为每次尝试
+获取新验证，并在签发验证的同一域名提交；验证失败或过期时会停止本次提交并给出脱敏错误，
+不会静默退回旧流程。只读诊断仍只查询状态，不获取验证、不签到。
+
+服务端决定实际入账积分。接口返回 `Checkin! Got 1 Points` 且流水增加 1，说明已签到但
+本次奖励较低；不应把它当作网络失败反复补签。当天已经入账的积分不保证能补差，适配后的
+奖励数额需由下一次首次签到的服务端响应和积分流水验证。此项与 User-Agent 配置问题分别排查。
+
+等待时间在官网 2.5 秒下限之上随机取 2.8–4.0 秒。GitHub Actions 的 `schedule` 触发会再随机等待 5–45 秒，手动运行和外部定时器不等待。签到 POST 超时会立刻重新获取 nonce 并再提交一次，不会沿用旧 proof。挑战阶段若返回 Cookie 失效（`code == -2`）或设备不匹配（`code == 4`），会直接失败，不再空等。
+
+日志和推送会显示套餐（Free / Edu / Basic / Pro / Team / Enterprise）、连签天数，并保留 Team 套餐的小数积分。`/api/user/status` 返回 `code == -101`（或 `leftDays == -101`）时剩余天数显示为已过期。重复签到若响应里没有总积分或连签，会再读 `/api/user/points` 补全。Cookie 会去掉误粘贴的 `Cookie:` 前缀、外层引号和首尾空白；含非 ASCII 字符的账号会被跳过，且日志不输出 Cookie、User-Agent、nonce 或 proof。任一账号失败时进程以退出码 1 结束，GitHub Actions 会标红。
 
 ### 🎁 积分自动兑换（#11）
 
@@ -367,18 +402,31 @@ else:
 
 ![添加 Secret](images/add-secret.png)
 
-添加以下两个 Secret：
+按需添加以下 Secret：
 
 | Name             | Value                    | 必需  |
 | ---------------- | ------------------------ | ----- |
 | `GLADOS_COOKIE`  | 第二步组合的 Cookie      | ✅ 是 |
 | `PUSHPLUS_TOKEN` | 微信推送 Token（见下方） | ❌ 否 |
+| `SERVERCHAN_SENDKEY` | Server酱 SendKey（见下方） | ❌ 否 |
 
 ---
 
-### 第四步：获取 PushPlus Token（可选）📱
+### 第四步：配置微信推送（可选）📱
 
-如果你希望签到后收到**微信通知**，请配置 PushPlus：
+如果你希望收到**微信通知**，可选择 Server酱或 PushPlus，也可同时配置。
+
+#### Server酱
+
+1. 需要微信通知时，访问 [Server酱 Turbo](https://sct.ftqq.com/)，登录并绑定微信接收渠道。本项目也兼容 [Server酱³](https://sc3.ft07.com/) 的独立 App 推送，接收方式见[官方通道说明](https://sct.ftqq.com/docs/getting-started/channels/)。
+2. 复制自己的 **SendKey**，Turbo 通常以 `SCT` 开头，Server酱³ 以 `sctp` 开头。
+3. 回到仓库 **Settings** → **Secrets and variables** → **Actions** → **New repository secret**，Name 填 `SERVERCHAN_SENDKEY`，Secret 填完整 SendKey，然后保存。
+
+只使用 Server酱时，无需配置 `PUSHPLUS_TOKEN`。推送包含账号、积分、剩余天数、签到结果和兑换信息，正文会转换为 Markdown。
+
+默认 `PUSH_LEVEL=fail_only`，仅在签到失败或发生兑换时推送。若希望每次签到成功也收到通知，请在 **Settings** → **Secrets and variables** → **Actions** → **Variables** → **New repository variable** 中添加 `PUSH_LEVEL`，值设为 `all`。这里的 `PUSH_LEVEL` 应配置为 **Variable**。
+
+#### PushPlus
 
 1. 访问 [https://www.pushplus.plus](https://www.pushplus.plus)
 2. 点击右上角 **登录**，使用微信扫码登录
@@ -530,6 +578,7 @@ export GLADOS_COOKIE="gld:sess=xxxxxx; gld:sess.sig=yyyyyy"
 
 # 可选：配置推送
 export PUSH_LEVEL="all"
+export SERVERCHAN_SENDKEY="SCT..."
 export TELEGRAM_BOT_TOKEN="xxx"
 export TELEGRAM_CHAT_ID="yyy"
 
@@ -578,6 +627,7 @@ python3 checkin.py
             # 【可选】消息推送配置
             pushLevel = "all"; # 或 "fail_only"
             pushplusToken = "xxx";
+            serverchanSendkey = "SCT...";
             telegramBotToken = "yyy";
             telegramChatId = "zzz";
           };
@@ -711,13 +761,14 @@ cookie1&cookie2&cookie3
 <details>
 <summary><b>Q: 没有收到微信推送怎么办？</b></summary>
 
-1. 检查 `PUSHPLUS_TOKEN` 是否配置正确
-2. 在 PushPlus 网站测试发送功能是否正常
-3. 查看 Actions 运行日志是否有错误
+1. 检查所选渠道的 Secret 是否配置正确：Server酱使用 `SERVERCHAN_SENDKEY`，PushPlus 使用 `PUSHPLUS_TOKEN`。
+2. 在相应服务的网站测试发送功能，并确认已绑定接收渠道。
+3. 默认 `PUSH_LEVEL=fail_only`，所有账号签到成功且没有兑换事件时不推送。需要每次推送时，在 Actions 的 **Variables** 中设置 `PUSH_LEVEL=all`。
+4. 确认手动运行时没有勾选 `diagnose_only`，并查看 Actions 日志中的推送结果。
 
 PushPlus 完全可选，不影响签到。[PushPlus 官方说明](https://www.pushplus.plus/doc/function/verify.html)要求发送消息的账号完成实名认证，未实名通常返回 `905`；认证费用以其当时页面为准，不是本项目收取的费用。
 
-不使用该服务时，可以不配置或删除 `PUSHPLUS_TOKEN`；签到仍会执行，也可以配置 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 使用 Telegram 推送。
+不使用该服务时，可以不配置或删除 `PUSHPLUS_TOKEN`；签到仍会执行，也可以配置 `SERVERCHAN_SENDKEY` 使用 Server酱，或配置 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 使用 Telegram 推送。
 
 </details>
 
@@ -782,6 +833,7 @@ GitHub 的 schedule 不是实时调度器：高负载时可能延迟，极端情
 
 | 贡献者 | 贡献 | Pull Request |
 | --- | --- | --- |
+| [@Ch3nSir](https://github.com/Ch3nSir) | 添加 Server酱 Turbo / Server酱³ 推送支持，补充部署说明、NixOS 配置和通知回归测试。 | [#27](https://github.com/lankerr/2026-glados-checkin/pull/27) |
 | [@badpinkman](https://github.com/badpinkman) | 适配新版 `gld:sess` 会话与浏览器设备校验，完善 Cookie 获取、User-Agent 配置和认证失败提示，并提供真实运行验证。 | [#18](https://github.com/lankerr/2026-glados-checkin/pull/18) |
 | [@Unexpectedlyc](https://github.com/Unexpectedlyc) | 调整 README 的部署顺序与说明，减少 GitHub Actions 和外部定时器配置带来的误解。 | [#5](https://github.com/lankerr/2026-glados-checkin/pull/5) |
 | [@Initsnow](https://github.com/Initsnow) | 添加 Telegram 推送、通知级别与 NixOS Flake 支持，并修复 Telegram 消息格式问题。 | [#3](https://github.com/lankerr/2026-glados-checkin/pull/3) |
@@ -844,7 +896,7 @@ MIT
 
 **Made with ❤️ for GLaDOS users in 2026**
 
-**🔧 本项目最近一次维护验证：2026-10-25**
+**🔧 本项目最近一次维护验证：2026-11-06**
 
 **⭐ Star 一下，支持作者持续更新！⭐**
 

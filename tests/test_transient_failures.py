@@ -25,7 +25,7 @@ class TransientFailureTests(unittest.TestCase):
             self.addCleanup(patch.stop)
 
     @mock.patch('checkin.log')
-    @mock.patch('checkin.requests.post')
+    @mock.patch('checkin.requests.Session.post')
     def test_server_error_and_timeouts_preserve_only_safe_metadata(self, post, log):
         response = mock.Mock(status_code=500)
         response.json.return_value = {'message': COOKIE}
@@ -33,7 +33,7 @@ class TransientFailureTests(unittest.TestCase):
             checkin.requests.ReadTimeout(COOKIE) for _ in checkin.DOMAINS[1:]
         ]
 
-        result = checkin.GLaDOS(COOKIE).checkin()
+        result = checkin.GLaDOS(COOKIE).req('POST', '/api/user/checkin')
 
         self.assertEqual(post.call_count, len(checkin.DOMAINS))
         response.json.assert_not_called()
@@ -48,21 +48,21 @@ class TransientFailureTests(unittest.TestCase):
         for private in ('private-session', 'private-signature'):
             self.assertNotIn(private, str(result) + str(log.call_args_list) + summary)
 
-    @mock.patch('checkin.requests.post')
+    @mock.patch('checkin.requests.Session.post')
     def test_fallback_success_discards_previous_failure_metadata(self, post):
         unavailable = mock.Mock(status_code=503)
         ok = mock.Mock(status_code=200)
         ok.json.return_value = {'code': 0, 'message': 'Checkin! Got 11 Points'}
         post.side_effect = [unavailable, ok]
 
-        result = checkin.GLaDOS(COOKIE).checkin()
+        result = checkin.GLaDOS(COOKIE).req('POST', '/api/user/checkin')
 
         self.assertEqual(result, ok.json.return_value)
         self.assertNotIn('request_failed', result)
         self.assertTrue(checkin.is_normal_checkin_result(result))
 
     @mock.patch('checkin.log')
-    @mock.patch('checkin.requests.post')
+    @mock.patch('checkin.requests.Session.post')
     def test_invalid_json_or_non_object_response_is_classified_without_body(self, post, log):
         for body in (ValueError(COOKIE), [COOKIE]):
             with self.subTest(body_type=type(body).__name__):
@@ -73,7 +73,7 @@ class TransientFailureTests(unittest.TestCase):
                     response.json.return_value = body
                 post.return_value = response
 
-                result = checkin.GLaDOS(COOKIE).checkin()
+                result = checkin.GLaDOS(COOKIE).req('POST', '/api/user/checkin')
 
                 self.assertTrue(result['invalid_response'])
                 self.assertIn('响应格式异常', checkin.summarize_checkin_failure(result))
@@ -146,7 +146,7 @@ class TransientFailureTests(unittest.TestCase):
         push.assert_not_called()
 
     @mock.patch('checkin.log')
-    @mock.patch('checkin.requests.get')
+    @mock.patch('checkin.requests.Session.get')
     def test_read_only_timeout_does_not_advise_refreshing_credentials(self, get, log):
         get.side_effect = checkin.requests.ReadTimeout(COOKIE)
 
